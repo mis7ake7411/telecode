@@ -14,7 +14,7 @@ This document provides comprehensive guidance for AI assistants (like Claude) wo
 - Shell command execution via `/cli` command
 - Session persistence across conversations
 
-**Current Version:** 0.1.4
+**Current Version:** 0.1.5
 **License:** MIT
 **Python Requirements:** >=3.10
 **Package Name:** telecode (on PyPI)
@@ -722,6 +722,34 @@ make release VERSION=0.1.5
    telecode --no-ngrok  # Should prompt for tunnel URL
    ```
 
+### Website Deployment
+
+Deploy the updated documentation website to S3/CloudFront:
+
+```bash
+make deploy
+```
+
+This will:
+1. Sync `docs/` folder to S3 bucket `gettelecode.com`
+2. Create CloudFront cache invalidation
+3. Website updates are live in 2-5 minutes
+
+**Configuration:**
+- S3 Bucket: `gettelecode.com` (configurable via `S3_BUCKET` variable)
+- CloudFront Distribution: `E3CT71G02GLRD5` (configurable via `CLOUDFRONT_ID` variable)
+- Domains: https://gettelecode.com and https://www.gettelecode.com
+
+**Custom deployment:**
+```bash
+# Deploy to different bucket/distribution
+make deploy S3_BUCKET=my-bucket CLOUDFRONT_ID=MY_DIST_ID
+```
+
+**Requirements:**
+- AWS CLI configured with credentials
+- Permissions for S3 (`s3:PutObject`, `s3:DeleteObject`) and CloudFront (`cloudfront:CreateInvalidation`)
+
 ## CI/CD Pipelines
 
 ### Tests Workflow (`.github/workflows/tests.yml`)
@@ -840,6 +868,7 @@ telecode              # Start server
 telecode -v           # Verbose logging
 pytest -q             # Run tests
 make release VERSION=0.1.5  # Release new version
+make deploy           # Deploy website to S3/CloudFront
 ```
 
 ### Telegram Commands
