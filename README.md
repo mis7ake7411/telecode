@@ -212,10 +212,12 @@ Download from [ffmpeg.org](https://ffmpeg.org/download.html)
 
 ## Quick Start
 
-### 1. Run the Server in root your project folder, where you have CLAUDE.MD or / ANGENTS.MD
+### 1. Run the Server
+
+Run the server in your project folder (where you have CLAUDE.md or AGENTS.md for AI context):
 
 ```bash
-> telecode
+telecode
 ```
 
 On first run, Telecode will prompt you for:
