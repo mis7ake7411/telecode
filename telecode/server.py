@@ -139,6 +139,18 @@ _SESSION_LOCKS: dict[str, threading.Lock] = {}
 _SESSION_LOCKS_GUARD = threading.Lock()
 _SESSIONS_FILE_GUARD = threading.Lock()
 _ENV_FILE_GUARD = threading.Lock()
+_CODEX_EMPTY_OUTPUT_COUNTS: dict[tuple[int, str], int] = {}
+_CODEX_EMPTY_OUTPUT_COUNTS_GUARD = threading.Lock()
+_IMAGE_GEN_PENDING_REQUESTS: dict[int, str] = {}
+_IMAGE_GEN_PENDING_GUARD = threading.Lock()
+_DEFAULT_CODEX_MODEL_ALLOWLIST = (
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex",
+    "gpt-5.2",
+)
+_DEFAULT_CODEX_MODEL = "gpt-5.2"
 _OPTION_PATTERN = re.compile(r"^\s*(\d+)[\.\)]\s+(.*\S)\s*$")
 _BULLET_PATTERN = re.compile(r"^\s*[-*•]\s+(.*\S)\s*$")
 _OPTION_CACHE: dict[tuple[int, int], tuple[float, list[str]]] = {}
@@ -244,6 +256,9 @@ def get_config() -> tuple[str, int | None, TelegramConfig, str, str]:
 def _ensure_bot_commands(telegram: TelegramConfig) -> None:
     desired = [
         {"command": "engine", "description": "Switch engine: /engine claude|codex"},
+        {"command": "model", "description": "Switch Codex model: /model <name>"},
+        {"command": "allow", "description": "Allow user: /allow <id|@username>"},
+        {"command": "deny", "description": "Remove user: /deny <id|@username>"},
         {"command": "claude", "description": "Use Claude for this chat"},
         {"command": "codex", "description": "Use Codex for this chat"},
         {"command": "tts_on", "description": "Enable TTS audio responses"},
@@ -316,6 +331,37 @@ def _handle_engine_command(
         )
         return True
 
+    if command == "/model":
+        _log(f"IN command chat_id={chat_id} command={command} args={rest}")
+        allowlist = _codex_model_allowlist()
+        if not rest:
+            current_model = _get_codex_model_for_chat(chat_id, sessions_file)
+            _send_message(
+                telegram,
+                chat_id,
+                f"Current Codex model: {current_model}. Allowed: {', '.join(allowlist)}.\n"
+                "Usage: /model <name>",
+                reply_to_message_id=message_id,
+            )
+            return True
+        selected_model = rest
+        if selected_model not in allowlist:
+            _send_message(
+                telegram,
+                chat_id,
+                f"Unsupported model: {selected_model}. Allowed: {', '.join(allowlist)}.",
+                reply_to_message_id=message_id,
+            )
+            return True
+        _set_codex_model_for_chat(chat_id, selected_model, sessions_file)
+        _send_message(
+            telegram,
+            chat_id,
+            f"Switched Codex model to {selected_model} for this chat.",
+            reply_to_message_id=message_id,
+        )
+        return True
+
     if command == "/tts_on":
         _log(f"IN command chat_id={chat_id} command={command}")
         _persist_tts_enabled(True)
@@ -382,6 +428,189 @@ def _handle_cli_command(
         telegram,
         chat_id,
         output,
+        reply_to_message_id=message_id,
+    )
+    return True
+
+
+def _format_allowed_users(ids: set[int], names: set[str]) -> str:
+    id_parts = [str(value) for value in sorted(ids)]
+    name_parts = [f"@{value}" for value in sorted(names)]
+    return ",".join(id_parts + name_parts)
+
+
+def _persist_allowed_users(ids: set[int], names: set[str]) -> None:
+    value = _format_allowed_users(ids, names)
+    os.environ["TELECODE_ALLOWED_USERS"] = value
+    env_path = _env_path()
+    with _ENV_FILE_GUARD:
+        lines = _read_env_lines(env_path)
+        lines = _set_env_value(lines, "TELECODE_ALLOWED_USERS", value)
+        _write_env_lines(env_path, lines)
+
+
+def _parse_allowed_user_token(raw: str) -> tuple[Optional[int], Optional[str]]:
+    token = raw.strip()
+    if not token:
+        return None, None
+    if token.isdigit():
+        return int(token), None
+    normalized = token.lstrip("@").strip().lower()
+    if re.fullmatch(r"[a-zA-Z0-9_]{3,64}", normalized):
+        return None, normalized
+    return None, None
+
+
+def _handle_access_command(
+    text: str,
+    chat_id: int,
+    message_id: int,
+    telegram: TelegramConfig,
+) -> bool:
+    if not text.startswith("/"):
+        return False
+    command, _, rest = text.partition(" ")
+    command = command.split("@", 1)[0].lower()
+    argument = rest.strip()
+    if command not in {"/allow", "/deny"}:
+        return False
+
+    user_id, username = _parse_allowed_user_token(argument)
+    if user_id is None and username is None:
+        _send_message(
+            telegram,
+            chat_id,
+            "Usage: /allow <user_id|@username> or /deny <user_id|@username>",
+            reply_to_message_id=message_id,
+        )
+        return True
+
+    allowed_ids, allowed_names = _allowed_users()
+    if command == "/allow":
+        if user_id is not None:
+            allowed_ids.add(user_id)
+            display = str(user_id)
+        else:
+            allowed_names.add(username or "")
+            display = f"@{username}"
+        _persist_allowed_users(allowed_ids, allowed_names)
+        _send_message(
+            telegram,
+            chat_id,
+            f"Allowed {display}.",
+            reply_to_message_id=message_id,
+        )
+        return True
+
+    if user_id is not None:
+        removed = user_id in allowed_ids
+        allowed_ids.discard(user_id)
+        display = str(user_id)
+    else:
+        removed = (username or "") in allowed_names
+        allowed_names.discard(username or "")
+        display = f"@{username}"
+
+    _persist_allowed_users(allowed_ids, allowed_names)
+    status = "Removed" if removed else "Not found"
+    _send_message(
+        telegram,
+        chat_id,
+        f"{status}: {display}.",
+        reply_to_message_id=message_id,
+    )
+    return True
+
+
+def _is_image_generation_request(text: str) -> bool:
+    lowered = text.lower()
+    if re.search(r"\b(analy[sz]e|describe|explain)\b", lowered):
+        return False
+    if any(token in lowered for token in ("分析", "辨識", "描述", "看圖")):
+        return False
+
+    patterns = [
+        r"\b(generate|create|make|draw)\b.{0,40}\b(image|picture|art|illustration|logo|poster|avatar|photo)\b",
+        r"\b(image|picture|art|illustration|logo|poster|avatar|photo)\b.{0,40}\b(generate|create|make|draw)\b",
+        r"(生成|產生|做|畫).{0,20}(圖片|圖像|照片|插圖|海報|頭像|logo|圖)",
+        r"(圖片|圖像|照片|插圖|海報|頭像|logo|圖).{0,20}(生成|產生|做|畫)",
+        r"\bimagegen\b",
+    ]
+    return any(re.search(pattern, lowered, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _extract_image_generation_subject(text: str) -> str:
+    subject = text.strip()
+    subject = re.sub(
+        r"(?i)\b(please|can you|could you|generate|create|make|draw|an|a|image|picture|art|illustration|logo|poster|avatar|photo)\b",
+        " ",
+        subject,
+    )
+    subject = re.sub(r"(請|幫我|幫忙|生成|產生|做|畫|一張|一個|圖片|圖像|照片|插圖|海報|頭像|圖)", " ", subject)
+    subject = " ".join(subject.split()).strip()
+    return subject or "a clean, modern hero image"
+
+
+def _set_image_gen_pending_request(chat_id: int, request_text: str) -> None:
+    with _IMAGE_GEN_PENDING_GUARD:
+        _IMAGE_GEN_PENDING_REQUESTS[chat_id] = request_text
+
+
+def _pop_image_gen_pending_request(chat_id: int) -> Optional[str]:
+    with _IMAGE_GEN_PENDING_GUARD:
+        return _IMAGE_GEN_PENDING_REQUESTS.pop(chat_id, None)
+
+
+def _peek_image_gen_pending_request(chat_id: int) -> Optional[str]:
+    with _IMAGE_GEN_PENDING_GUARD:
+        return _IMAGE_GEN_PENDING_REQUESTS.get(chat_id)
+
+
+def _build_image_prompt_draft(request_text: str) -> str:
+    subject = _extract_image_generation_subject(request_text)
+    return (
+        "圖片提示詞草稿：\n"
+        f"\"{subject}, highly detailed, balanced composition, natural lighting, clean background, "
+        "professional quality, 4k, no text, no watermark\""
+    )
+
+
+def _build_local_image_command(request_text: str) -> str:
+    subject = _extract_image_generation_subject(request_text).replace('"', '\\"')
+    return (
+        "本機執行指令（Codex CLI）：\n"
+        f"codex exec \"Use image_gen to create: {subject}. Save final PNG into ./images/ and print the file path only.\""
+    )
+
+
+def _handle_image_generation_request(
+    text: str,
+    chat_id: int,
+    message_id: int,
+    telegram: TelegramConfig,
+) -> bool:
+    pending_request = _peek_image_gen_pending_request(chat_id)
+    stripped = text.strip()
+    if pending_request and stripped in {"1", "2"}:
+        original_request = _pop_image_gen_pending_request(chat_id) or pending_request
+        if stripped == "1":
+            response = _build_image_prompt_draft(original_request)
+        else:
+            response = _build_local_image_command(original_request)
+        _send_message(telegram, chat_id, response, reply_to_message_id=message_id)
+        return True
+
+    if not _is_image_generation_request(text):
+        return False
+
+    _set_image_gen_pending_request(chat_id, text)
+    _send_message(
+        telegram,
+        chat_id,
+        "目前我可以分析你上傳的圖片，但還不能直接把新生成的圖片回傳到 Telegram。\n\n"
+        "請回覆數字：\n"
+        "1. 產生 prompt\n"
+        "2. 產生本機執行指令",
         reply_to_message_id=message_id,
     )
     return True
@@ -553,6 +782,10 @@ def handle_text_message(
         if _handle_cli_command(text, chat_id, message_id, telegram):
             return
         if _handle_engine_command(text, chat_id, message_id, telegram, sessions_file, default_engine):
+            return
+        if _handle_access_command(text, chat_id, message_id, telegram):
+            return
+        if _handle_image_generation_request(text, chat_id, message_id, telegram):
             return
         _handle_prompt(text, chat_id, message_id, timeout_s, telegram, sessions_file, default_engine)
     except Exception as exc:
@@ -762,6 +995,7 @@ def _handle_prompt(
     image_paths: Optional[list[str]] = None,
 ) -> None:
     engine = _get_engine_for_chat(chat_id, default_engine, sessions_file)
+    codex_model = _get_codex_model_for_chat(chat_id, sessions_file)
     session_id = _get_or_create_session(chat_id, sessions_file, engine)
     answer, _ = _run_engine_locked(
         prompt,
@@ -769,6 +1003,7 @@ def _handle_prompt(
         session_id,
         timeout_s,
         engine,
+        codex_model,
         chat_id,
         sessions_file,
     )
@@ -812,12 +1047,61 @@ def _get_or_create_session(chat_id: int, sessions_file: str, engine: str) -> Opt
     return session_id
 
 
+def _is_codex_empty_output_error(detail: str) -> bool:
+    return "empty output" in detail.lower()
+
+
+def _codex_empty_output_reset_threshold() -> int:
+    raw = os.getenv("TELECODE_CODEX_EMPTY_OUTPUT_RESET_N", "3").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return 3
+    return max(1, value)
+
+
+def _codex_empty_output_retry_delay_s() -> float:
+    raw = os.getenv("TELECODE_CODEX_EMPTY_OUTPUT_RETRY_DELAY_S", "0.5").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return 0.5
+    return max(0.0, value)
+
+
+def _codex_empty_output_key(chat_id: int, session_id: Optional[str]) -> tuple[int, str]:
+    return (chat_id, session_id or "__none__")
+
+
+def _increment_codex_empty_output_count(chat_id: int, session_id: Optional[str]) -> int:
+    key = _codex_empty_output_key(chat_id, session_id)
+    with _CODEX_EMPTY_OUTPUT_COUNTS_GUARD:
+        count = _CODEX_EMPTY_OUTPUT_COUNTS.get(key, 0) + 1
+        _CODEX_EMPTY_OUTPUT_COUNTS[key] = count
+        return count
+
+
+def _clear_codex_empty_output_counts_for_chat(chat_id: int) -> None:
+    with _CODEX_EMPTY_OUTPUT_COUNTS_GUARD:
+        to_delete = [key for key in _CODEX_EMPTY_OUTPUT_COUNTS if key[0] == chat_id]
+        for key in to_delete:
+            _CODEX_EMPTY_OUTPUT_COUNTS.pop(key, None)
+
+
+def _reset_codex_session(chat_id: int, sessions_file: str) -> None:
+    sessions = _load_sessions(sessions_file)
+    sessions["codex"] = None
+    _save_sessions(sessions_file, sessions)
+    _clear_codex_empty_output_counts_for_chat(chat_id)
+
+
 def _run_engine_locked(
     prompt: str,
     image_paths: list[str],
     session_id: Optional[str],
     timeout_s: Optional[int],
     engine: str,
+    codex_model: str,
     chat_id: int,
     sessions_file: str,
 ) -> tuple[str, Optional[str]]:
@@ -836,12 +1120,80 @@ def _run_engine_locked(
             )
 
         codex_prompt = _format_codex_prompt(prompt)
-        answer, new_session_id, logs = ask_codex_exec(
-            codex_prompt,
-            session_id,
-            timeout_s,
-            image_paths=image_paths,
-        )
+        try:
+            answer, new_session_id, logs = ask_codex_exec(
+                codex_prompt,
+                session_id,
+                timeout_s,
+                image_paths=image_paths,
+                model=codex_model,
+            )
+        except RuntimeError as exc:
+            detail = str(exc)
+            _log(f"Codex runtime error: {detail}")
+            if _is_codex_empty_output_error(detail):
+                retry_delay_s = _codex_empty_output_retry_delay_s()
+                if retry_delay_s > 0:
+                    time.sleep(retry_delay_s)
+                _log("Codex returned empty output; retrying once with same session.")
+                try:
+                    answer, new_session_id, logs = ask_codex_exec(
+                        codex_prompt,
+                        session_id,
+                        timeout_s,
+                        image_paths=image_paths,
+                        model=codex_model,
+                    )
+                    _clear_codex_empty_output_counts_for_chat(chat_id)
+                    if new_session_id and new_session_id != session_id:
+                        _store_session(chat_id, sessions_file, engine, new_session_id)
+                    return answer, logs
+                except RuntimeError as retry_exc:
+                    retry_detail = str(retry_exc)
+                    _log(f"Codex retry runtime error: {retry_detail}")
+                    if not _is_codex_empty_output_error(retry_detail):
+                        return (f"Codex error: {retry_detail}", None)
+
+                empty_output_count = _increment_codex_empty_output_count(chat_id, session_id)
+                threshold = _codex_empty_output_reset_threshold()
+                if empty_output_count < threshold:
+                    return (
+                        "Codex returned no output for this request. Please retry. "
+                        f"(Auto-reset after {threshold} consecutive empty outputs.)",
+                        None,
+                    )
+
+                _log(
+                    f"Codex empty output count reached threshold={threshold}; resetting session for chat_id={chat_id}."
+                )
+                _reset_codex_session(chat_id, sessions_file)
+                try:
+                    answer, new_session_id, logs = ask_codex_exec(
+                        codex_prompt,
+                        None,
+                        timeout_s,
+                        image_paths=image_paths,
+                        model=codex_model,
+                    )
+                except RuntimeError as reset_exc:
+                    reset_detail = str(reset_exc)
+                    _log(f"Codex runtime error after session reset: {reset_detail}")
+                    if _is_codex_empty_output_error(reset_detail):
+                        return (
+                            "Codex returned no output even after automatic session reset. Please try again in a moment.",
+                            None,
+                        )
+                    return (f"Codex error after automatic session reset: {reset_detail}", None)
+
+                if new_session_id:
+                    _store_session(chat_id, sessions_file, engine, new_session_id)
+                return (
+                    "Codex session was automatically reset after repeated empty outputs.\n\n"
+                    f"{answer}",
+                    logs,
+                )
+            return (f"Codex error: {detail}", None)
+        _clear_codex_empty_output_counts_for_chat(chat_id)
         if new_session_id:
             _log(f"Codex session_id={new_session_id}")
         else:
@@ -1021,6 +1373,74 @@ def _persist_engine_default(engine: str) -> None:
         _write_env_lines(env_path, lines)
 
 
+def _codex_model_allowlist() -> list[str]:
+    raw = os.getenv("TELECODE_CODEX_MODEL_ALLOWLIST", "").strip()
+    if not raw:
+        return list(_DEFAULT_CODEX_MODEL_ALLOWLIST)
+    parsed = [part.strip().lower() for part in raw.replace(" ", "").split(",") if part.strip()]
+    return parsed or list(_DEFAULT_CODEX_MODEL_ALLOWLIST)
+
+
+def _codex_model_default() -> str:
+    allowlist = _codex_model_allowlist()
+    candidate = (
+        os.getenv("TELECODE_CODEX_MODEL_DEFAULT", "").strip().lower()
+        or os.getenv("TELECODE_CODEX_MODEL", "").strip().lower()
+        or _DEFAULT_CODEX_MODEL
+    )
+    if candidate in allowlist:
+        return candidate
+    if _DEFAULT_CODEX_MODEL in allowlist:
+        return _DEFAULT_CODEX_MODEL
+    return allowlist[0]
+
+
+def _get_codex_model_for_chat(chat_id: int, sessions_file: str) -> str:
+    allowlist = _codex_model_allowlist()
+    default_model = _codex_model_default()
+    overrides = _load_codex_model_overrides(sessions_file)
+    selected = overrides.get(str(chat_id), default_model).strip().lower()
+    if selected in allowlist:
+        return selected
+    return default_model
+
+
+def _set_codex_model_for_chat(chat_id: int, model: str, sessions_file: str) -> None:
+    allowlist = _codex_model_allowlist()
+    normalized = model.strip().lower()
+    if normalized not in allowlist:
+        return
+    with _SESSIONS_FILE_GUARD:
+        if sessions_file.endswith(".json"):
+            data = _load_sessions_data_json(sessions_file) or {}
+            if not isinstance(data, dict):
+                data = {}
+            overrides = data.get("codex_model_overrides")
+            if not isinstance(overrides, dict):
+                overrides = {}
+            overrides[str(chat_id)] = normalized
+            data["codex_model_overrides"] = overrides
+            with open(sessions_file, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2, sort_keys=True)
+        else:
+            _save_codex_model_override_kv(sessions_file, chat_id, normalized)
+
+
+def _persist_codex_model_default(model: str) -> None:
+    allowlist = _codex_model_allowlist()
+    normalized = model.strip().lower()
+    if normalized not in allowlist:
+        return
+    os.environ["TELECODE_CODEX_MODEL_DEFAULT"] = normalized
+    os.environ["TELECODE_CODEX_MODEL"] = normalized
+    env_path = _env_path()
+    with _ENV_FILE_GUARD:
+        lines = _read_env_lines(env_path)
+        lines = _set_env_value(lines, "TELECODE_CODEX_MODEL_DEFAULT", normalized)
+        lines = _set_env_value(lines, "TELECODE_CODEX_MODEL", normalized)
+        _write_env_lines(env_path, lines)
+
+
 def _load_engine_overrides(sessions_file: str) -> dict[str, str]:
     if sessions_file.endswith(".json"):
         data = _load_sessions_data_json(sessions_file)
@@ -1057,6 +1477,45 @@ def _save_engine_override_kv(path: str, chat_id: int, engine: str) -> None:
             new_lines.append(line)
     if not updated:
         new_lines.append(f"{prefix}{chat_id}={engine}")
+    _write_env_lines(path, new_lines)
+
+
+def _load_codex_model_overrides(sessions_file: str) -> dict[str, str]:
+    if sessions_file.endswith(".json"):
+        data = _load_sessions_data_json(sessions_file)
+        if not isinstance(data, dict):
+            return {}
+        overrides = data.get("codex_model_overrides")
+        if not isinstance(overrides, dict):
+            return {}
+        return {str(k): str(v).strip().lower() for k, v in overrides.items() if isinstance(v, str)}
+    return _load_codex_model_overrides_kv(sessions_file)
+
+
+def _load_codex_model_overrides_kv(path: str) -> dict[str, str]:
+    data = _read_kv_file(path)
+    prefix = "TELECODE_CODEX_MODEL_OVERRIDE_"
+    overrides: dict[str, str] = {}
+    for key, value in data.items():
+        if key.startswith(prefix):
+            overrides[key[len(prefix):]] = value.strip().lower()
+    return overrides
+
+
+def _save_codex_model_override_kv(path: str, chat_id: int, model: str) -> None:
+    prefix = "TELECODE_CODEX_MODEL_OVERRIDE_"
+    lines = _read_env_lines(path)
+    target = f"{prefix}{chat_id}="
+    updated = False
+    new_lines: list[str] = []
+    for line in lines:
+        if line.startswith(target):
+            new_lines.append(f"{prefix}{chat_id}={model}")
+            updated = True
+        else:
+            new_lines.append(line)
+    if not updated:
+        new_lines.append(f"{prefix}{chat_id}={model}")
     _write_env_lines(path, new_lines)
 
 

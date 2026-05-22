@@ -324,6 +324,9 @@ def _print_command_help() -> None:
 def _ensure_bot_commands(bot_token: str, enable_cli: bool) -> None:
     desired = [
         {"command": "engine", "description": "Switch engine: /engine claude|codex"},
+        {"command": "model", "description": "Switch Codex model: /model <name>"},
+        {"command": "allow", "description": "Allow user: /allow <id|@username>"},
+        {"command": "deny", "description": "Remove user: /deny <id|@username>"},
         {"command": "claude", "description": "Use Claude for this chat"},
         {"command": "codex", "description": "Use Codex for this chat"},
         {"command": "tts_on", "description": "Enable TTS audio responses"},
