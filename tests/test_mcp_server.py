@@ -1,4 +1,5 @@
 import subprocess
+import os
 import pytest
 
 
@@ -69,6 +70,8 @@ def test_get_or_create_mcp_session():
 
 def test_local_cli_tool(monkeypatch):
     """Test CLI tool execution."""
+    os.environ["TELECODE_ENABLE_CLI"] = "1"
+
     class MockResult:
         stdout = "test output"
         stderr = ""
@@ -86,6 +89,8 @@ def test_local_cli_tool(monkeypatch):
 
 def test_local_cli_tool_timeout(monkeypatch):
     """Test CLI tool handles timeout gracefully."""
+    os.environ["TELECODE_ENABLE_CLI"] = "1"
+
     def mock_run(cmd, **kwargs):
         raise subprocess.TimeoutExpired(cmd, 10)
 
@@ -98,6 +103,8 @@ def test_local_cli_tool_timeout(monkeypatch):
 
 def test_local_cli_tool_error(monkeypatch):
     """Test CLI tool handles subprocess errors."""
+    os.environ["TELECODE_ENABLE_CLI"] = "1"
+
     def mock_run(cmd, **kwargs):
         raise Exception("command failed")
 
@@ -106,6 +113,17 @@ def test_local_cli_tool_error(monkeypatch):
     from telecode.mcp_server import _local_cli_impl
     result = _local_cli_impl("invalid_command")
     assert "error" in result.lower() or "failed" in result.lower()
+
+
+def test_local_cli_tool_disabled(monkeypatch):
+    """Test CLI tool is blocked when disabled."""
+    os.environ["TELECODE_ENABLE_CLI"] = "0"
+
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError))
+
+    from telecode.mcp_server import _local_cli_impl
+    result = _local_cli_impl("echo test")
+    assert "disabled" in result.lower()
 
 
 def test_local_claude_code_tool(monkeypatch):

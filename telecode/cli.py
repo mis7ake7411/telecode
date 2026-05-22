@@ -14,6 +14,8 @@ from telecode.telegram import (
     telegram_set_webhook,
 )
 
+_WEBHOOK_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
+
 
 def _global_config_path() -> str:
     return os.path.expanduser("~/.telecode")
@@ -270,37 +272,65 @@ def _ensure_bot_token() -> str | None:
     return token
 
 
+def _is_feature_enabled(name: str, default: bool = False) -> bool:
+    value = os.getenv(name, "").strip().lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "on", "enable", "enabled"}
+
+
+def _require_allowed_users() -> None:
+    if os.getenv("TELECODE_ALLOWED_USERS", "").strip():
+        return
+    _print_boxed_message(
+        [
+            "Startup blocked for safety.",
+            "TELECODE_ALLOWED_USERS is required and cannot be empty.",
+            "Set comma-separated Telegram user IDs or @usernames.",
+        ]
+    )
+    raise SystemExit(2)
+
+
+def _ensure_webhook_secret_token() -> str:
+    token = os.getenv("TELEGRAM_WEBHOOK_SECRET_TOKEN", "").strip()
+    if not token:
+        token = uuid.uuid4().hex
+    if not _WEBHOOK_TOKEN_PATTERN.fullmatch(token):
+        raise RuntimeError(
+            "TELEGRAM_WEBHOOK_SECRET_TOKEN must match ^[A-Za-z0-9_-]{1,256}$."
+        )
+    os.environ["TELEGRAM_WEBHOOK_SECRET_TOKEN"] = token
+    return token
+
+
 def _print_command_help() -> None:
+    cli_enabled = _is_feature_enabled("TELECODE_ENABLE_CLI")
     lines = [
         "Telegram bot commands:",
         "/engine            Show current engine",
         "/claude            Switch to Claude",
         "/codex             Switch to Codex",
-        "/cli <cmd>         Run a shell command",
         "/tts_on            Enable TTS audio responses",
         "/tts_off           Disable TTS audio responses",
     ]
-    if not os.getenv("TELECODE_ALLOWED_USERS", "").strip():
-        lines.extend(
-            [
-                "",
-                "Access control:",
-                "TELECODE_ALLOWED_USERS is empty (allowing all users).",
-                "Set it to comma-separated Telegram user IDs or @usernames.",
-            ]
-        )
+    if cli_enabled:
+        lines.insert(4, "/cli <cmd>         Run a shell command")
+    else:
+        lines.extend(["", "CLI commands are disabled. Use --enable-cli to enable."])
     _print_boxed_message(lines)
 
 
-def _ensure_bot_commands(bot_token: str) -> None:
+def _ensure_bot_commands(bot_token: str, enable_cli: bool) -> None:
     desired = [
         {"command": "engine", "description": "Switch engine: /engine claude|codex"},
         {"command": "claude", "description": "Use Claude for this chat"},
         {"command": "codex", "description": "Use Codex for this chat"},
-        {"command": "cli", "description": "Run a shell command: /cli <cmd>"},
         {"command": "tts_on", "description": "Enable TTS audio responses"},
         {"command": "tts_off", "description": "Disable TTS audio responses"},
     ]
+    if enable_cli:
+        desired.insert(3, {"command": "cli", "description": "Run a shell command: /cli <cmd>"})
     telegram = TelegramConfig(bot_token=bot_token)
     existing = telegram_get_my_commands(telegram)
     existing_commands = {cmd.get("command") for cmd in existing if isinstance(cmd, dict)}
@@ -345,6 +375,15 @@ def main() -> None:
         action="store_true",
         help="Enable MCP server for exposing tools to other agents",
     )
+    parser.add_argument(
+        "--enable-cli",
+        action="store_true",
+        help="Enable /cli and local_cli command execution (high risk)",
+    )
+    parser.add_argument(
+        "--mcp-auth-token",
+        help="Bearer token required for MCP endpoints",
+    )
 
     args = parser.parse_args()
 
@@ -357,6 +396,13 @@ def main() -> None:
         os.environ["TELECODE_VERBOSE"] = "1"
     if args.enable_mcp:
         os.environ["TELECODE_ENABLE_MCP"] = "1"
+    if args.enable_cli:
+        os.environ["TELECODE_ENABLE_CLI"] = "1"
+    if args.mcp_auth_token:
+        os.environ["TELECODE_MCP_AUTH_TOKEN"] = args.mcp_auth_token
+
+    _require_allowed_users()
+    cli_enabled = _is_feature_enabled("TELECODE_ENABLE_CLI")
 
     bot_token = _ensure_bot_token()
     tunnel_url = _ensure_tunnel_url(args.no_ngrok)
@@ -364,7 +410,7 @@ def main() -> None:
         _print_boxed_message([f"Tunnel URL: {tunnel_url}"])
     if bot_token:
         try:
-            _ensure_bot_commands(bot_token)
+            _ensure_bot_commands(bot_token, enable_cli=cli_enabled)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 _print_boxed_message([
@@ -398,7 +444,7 @@ def main() -> None:
 
                     # Retry with new token
                     try:
-                        _ensure_bot_commands(bot_token)
+                        _ensure_bot_commands(bot_token, enable_cli=cli_enabled)
                         print("✓ Bot token validated successfully!")
                     except Exception as retry_exc:
                         print(f"Warning: failed to register bot commands with new token: {retry_exc}")
@@ -410,10 +456,15 @@ def main() -> None:
             print(f"Warning: failed to register bot commands: {exc}")
     if bot_token and tunnel_url:
         secret = str(uuid.uuid4())
+        secret_token = _ensure_webhook_secret_token()
         os.environ["TELEGRAM_WEBHOOK_SECRET"] = secret
         webhook_url = f"{tunnel_url.rstrip('/')}/telegram/{secret}"
         try:
-            telegram_set_webhook(TelegramConfig(bot_token=bot_token), webhook_url)
+            telegram_set_webhook(
+                TelegramConfig(bot_token=bot_token),
+                webhook_url,
+                secret_token=secret_token,
+            )
         except Exception as exc:
             print(f"Warning: failed to set Telegram webhook: {exc}")
 

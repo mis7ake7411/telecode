@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import re
@@ -15,9 +16,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from dotenv import load_dotenv
-import time
 
 from telecode.claude import ask_claude_code
 from telecode.codex import ask_codex_exec
@@ -94,8 +95,31 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 
         return response
 
+
+class MCPAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        token = os.getenv("TELECODE_MCP_AUTH_TOKEN", "").strip()
+        if not token:
+            return await call_next(request)
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        if not request.url.path.startswith("/mcp"):
+            return await call_next(request)
+
+        authorization = request.headers.get("authorization", "")
+        if not authorization.startswith("Bearer "):
+            return JSONResponse(status_code=401, content={"detail": "Missing MCP bearer token"})
+
+        provided_token = authorization[len("Bearer ") :].strip()
+        if not hmac.compare_digest(provided_token, token):
+            return JSONResponse(status_code=401, content={"detail": "Invalid MCP bearer token"})
+
+        return await call_next(request)
+
+
 # Add logging middleware first (so it captures all requests)
 app.add_middleware(LoggingMiddleware)
+app.add_middleware(MCPAuthMiddleware)
 
 # Debug: Print on startup to verify verbose mode
 verbose_env = os.getenv("TELECODE_VERBOSE", "NOT SET")
@@ -120,6 +144,17 @@ _BULLET_PATTERN = re.compile(r"^\s*[-*•]\s+(.*\S)\s*$")
 _OPTION_CACHE: dict[tuple[int, int], tuple[float, list[str]]] = {}
 _OPTION_CACHE_GUARD = threading.Lock()
 _OPTION_CACHE_TTL_S = 3600
+
+
+def _is_feature_enabled(name: str, default: bool = False) -> bool:
+    value = os.getenv(name, "").strip().lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "on", "enable", "enabled"}
+
+
+def _is_cli_enabled() -> bool:
+    return _is_feature_enabled("TELECODE_ENABLE_CLI", default=False)
 
 
 def _get_env(name: str) -> str:
@@ -211,10 +246,11 @@ def _ensure_bot_commands(telegram: TelegramConfig) -> None:
         {"command": "engine", "description": "Switch engine: /engine claude|codex"},
         {"command": "claude", "description": "Use Claude for this chat"},
         {"command": "codex", "description": "Use Codex for this chat"},
-        {"command": "cli", "description": "Run a shell command: /cli <cmd>"},
         {"command": "tts_on", "description": "Enable TTS audio responses"},
         {"command": "tts_off", "description": "Disable TTS audio responses"},
     ]
+    if _is_cli_enabled():
+        desired.insert(3, {"command": "cli", "description": "Run a shell command: /cli <cmd>"})
     existing = telegram_get_my_commands(telegram)
     existing_commands = {cmd.get("command") for cmd in existing if isinstance(cmd, dict)}
     missing = [cmd for cmd in desired if cmd["command"] not in existing_commands]
@@ -322,6 +358,14 @@ def _handle_cli_command(
     match = re.match(r"^/cli(?:@\S+)?(?:\s+(.*))?\s*$", text)
     if not match:
         return False
+    if not _is_cli_enabled():
+        _send_message(
+            telegram,
+            chat_id,
+            "CLI is disabled. Restart with TELECODE_ENABLE_CLI=1 or --enable-cli.",
+            reply_to_message_id=message_id,
+        )
+        return True
     cmd = (match.group(1) or "").strip()
     if not cmd:
         _send_message(
@@ -367,6 +411,11 @@ async def telegram_webhook(secret: str, req: Request, background: BackgroundTask
     webhook_secret, timeout_s, telegram, sessions_file, engine = get_config()
     if secret != webhook_secret:
         raise HTTPException(status_code=401)
+    webhook_secret_token = os.getenv("TELEGRAM_WEBHOOK_SECRET_TOKEN", "").strip()
+    if webhook_secret_token:
+        received_token = req.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if not hmac.compare_digest(received_token, webhook_secret_token):
+            raise HTTPException(status_code=401)
 
     update = await req.json()
     callback = update.get("callback_query")
@@ -578,7 +627,7 @@ def handle_photo_message(
             reply_to_message_id=message_id,
         )
     finally:
-        pass
+        _cleanup_temp_file(image_path)
 
 
 def handle_document_message(
@@ -644,7 +693,7 @@ def handle_document_message(
             reply_to_message_id=message_id,
         )
     finally:
-        pass
+        _cleanup_temp_file(image_path)
 
 
 def handle_callback_query(
@@ -1316,6 +1365,18 @@ def _maybe_send_tts(answer: str, chat_id: int, message_id: int, telegram: Telegr
         telegram_send_audio(telegram, chat_id, audio_path, reply_to_message_id=message_id)
     except Exception as exc:
         _log_exception("telegram_send_audio", exc)
+    finally:
+        _cleanup_temp_file(audio_path)
+
+
+def _cleanup_temp_file(path: Optional[str]) -> None:
+    if not path:
+        return
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception as exc:
+        _log_exception("cleanup_temp_file", exc)
 
 
 def _synthesize_fish_tts(text: str, token: str) -> str:

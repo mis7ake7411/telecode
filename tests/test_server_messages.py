@@ -1,4 +1,8 @@
 import os
+import asyncio
+
+import pytest
+from fastapi import BackgroundTasks
 
 import telecode.server as server
 
@@ -64,6 +68,7 @@ def test_engine_command_persists_to_local_file(monkeypatch, tmp_path):
 def test_cli_command_runs_without_prompt(monkeypatch, tmp_path):
     _set_cwd(tmp_path, monkeypatch)
     os.environ["TELECODE_ALLOWED_USERS"] = ""
+    os.environ["TELECODE_ENABLE_CLI"] = "1"
     captured = {"ran": False}
     sent = []
 
@@ -85,6 +90,27 @@ def test_cli_command_runs_without_prompt(monkeypatch, tmp_path):
 
     assert captured["ran"] is True
     assert sent == ["ok"]
+
+
+def test_cli_command_blocked_when_disabled(monkeypatch, tmp_path):
+    _set_cwd(tmp_path, monkeypatch)
+    os.environ["TELECODE_ALLOWED_USERS"] = ""
+    os.environ["TELECODE_ENABLE_CLI"] = "0"
+    sent = []
+
+    monkeypatch.setattr(server, "_send_message", lambda *args, **kwargs: sent.append(args[2]) or 1)
+    monkeypatch.setattr(server, "_run_cli_command", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError))
+
+    msg = {
+        "message_id": 31,
+        "chat": {"id": 331},
+        "text": "/cli pwd",
+        "from": {"id": 331, "username": "tester"},
+    }
+    server.handle_text_message(msg, None, _dummy_telegram(), ".telecode", "claude")
+
+    assert len(sent) == 1
+    assert "disabled" in sent[0].lower()
 
 
 def test_handle_photo_message_passes_image_path(monkeypatch, tmp_path):
@@ -112,7 +138,7 @@ def test_handle_photo_message_passes_image_path(monkeypatch, tmp_path):
     server.handle_photo_message(msg, None, _dummy_telegram(), ".telecode", "claude")
 
     assert captured["paths"]
-    assert os.path.exists(captured["paths"][0])
+    assert not os.path.exists(captured["paths"][0])
 
 
 def test_handle_document_image_passes_image_path(monkeypatch, tmp_path):
@@ -140,7 +166,7 @@ def test_handle_document_image_passes_image_path(monkeypatch, tmp_path):
     server.handle_document_message(msg, None, _dummy_telegram(), ".telecode", "claude")
 
     assert captured["paths"]
-    assert os.path.exists(captured["paths"][0])
+    assert not os.path.exists(captured["paths"][0])
 
 
 def test_disallowed_user_is_blocked(monkeypatch, tmp_path):
@@ -182,4 +208,28 @@ def test_allowed_username_is_accepted(monkeypatch, tmp_path):
     server.handle_text_message(msg, None, _dummy_telegram(), ".telecode", "claude")
 
     assert captured["prompt"] == "hi"
+
+
+class _DummyRequest:
+    def __init__(self, payload: dict, headers: dict[str, str]):
+        self._payload = payload
+        self.headers = headers
+
+    async def json(self):
+        return self._payload
+
+
+def test_webhook_header_secret_token_rejected(monkeypatch, tmp_path):
+    _set_cwd(tmp_path, monkeypatch)
+    os.environ["TELEGRAM_WEBHOOK_SECRET"] = "path-secret"
+    os.environ["TELEGRAM_WEBHOOK_SECRET_TOKEN"] = "header-secret"
+    os.environ["TELEGRAM_BOT_TOKEN"] = "token"
+    os.environ["TELECODE_ENGINE"] = "claude"
+    os.environ["TELECODE_ALLOWED_USERS"] = "123"
+
+    req = _DummyRequest({"message": None}, headers={})
+    with pytest.raises(server.HTTPException) as exc_info:
+        asyncio.run(server.telegram_webhook("path-secret", req, BackgroundTasks()))
+
+    assert exc_info.value.status_code == 401
 
