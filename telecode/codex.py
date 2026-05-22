@@ -9,10 +9,11 @@ def ask_codex_exec(
     session_id: Optional[str],
     timeout_s: Optional[int],
     image_paths: Optional[list[str]] = None,
+    model: Optional[str] = None,
 ) -> tuple[str, Optional[str], str]:
     """Run codex exec, optionally resuming a session, and return answer + session_id + logs."""
     use_images = image_paths or []
-    cmd = _build_cmd(prompt, session_id, image_paths=use_images)
+    cmd = _build_cmd(prompt, session_id, image_paths=use_images, model=model)
     prompt_input = prompt if use_images else None
     stdout, stderr = _run_codex(cmd, timeout_s, prompt_input=prompt_input)
 
@@ -32,8 +33,11 @@ def _build_cmd(
     prompt: str,
     session_id: Optional[str],
     image_paths: list[str],
+    model: Optional[str] = None,
 ) -> list[str]:
     base = ["codex", "exec"]
+    if model:
+        base.extend(["--model", model])
     for path in image_paths:
         base.extend(["--image", path])
     if session_id:
