@@ -22,6 +22,11 @@ def _is_verbose() -> bool:
     return value in {"1", "true", "yes", "on", "verbose", "debug"}
 
 
+def _is_cli_enabled() -> bool:
+    value = os.getenv("TELECODE_ENABLE_CLI", "").strip().lower()
+    return value in {"1", "true", "yes", "on", "enable", "enabled"}
+
+
 def _get_mcp_session(client_id: str, engine: str) -> Optional[str]:
     """Retrieve MCP session ID for a client and engine.
 
@@ -207,6 +212,9 @@ def _local_cli_impl(command: str, timeout_s: int = 30) -> str:
     Returns:
         Command output (stdout + stderr), or error message
     """
+    if not _is_cli_enabled():
+        return "Error: local_cli is disabled. Enable with TELECODE_ENABLE_CLI=1 or --enable-cli."
+
     try:
         completed = subprocess.run(
             command,

@@ -84,8 +84,14 @@ def telegram_set_my_commands(
 def telegram_set_webhook(
     config: TelegramConfig,
     url: str,
+    secret_token: str | None = None,
+    drop_pending_updates: bool = False,
 ) -> None:
     payload: dict[str, Any] = {"url": url}
+    if secret_token:
+        payload["secret_token"] = secret_token
+    if drop_pending_updates:
+        payload["drop_pending_updates"] = True
     _post_json(f"{config.api_base}/setWebhook", payload)
 
 
