@@ -468,6 +468,106 @@ def test_image_generation_request_returns_guidance(monkeypatch, tmp_path):
     assert "2. 產生本機執行指令" in sent[0]
 
 
+def test_non_image_request_english_draw_conclusion_goes_to_prompt(monkeypatch, tmp_path):
+    _set_cwd(tmp_path, monkeypatch)
+    os.environ["TELECODE_ALLOWED_USERS"] = ""
+    captured = {}
+    sent = []
+
+    monkeypatch.setattr(server, "_send_message", lambda *args, **kwargs: sent.append(args[2]) or 1)
+
+    def fake_handle_prompt(prompt, *_args, **_kwargs):
+        captured["prompt"] = prompt
+
+    monkeypatch.setattr(server, "_handle_prompt", fake_handle_prompt)
+
+    msg = {
+        "message_id": 101,
+        "chat": {"id": 1901},
+        "text": "Please draw a conclusion from these logs",
+        "from": {"id": 1901, "username": "tester"},
+    }
+    server.handle_text_message(msg, None, _dummy_telegram(), ".telecode", "claude")
+
+    assert captured["prompt"] == "Please draw a conclusion from these logs"
+    assert sent == []
+
+
+def test_non_image_request_chinese_design_schema_goes_to_prompt(monkeypatch, tmp_path):
+    _set_cwd(tmp_path, monkeypatch)
+    os.environ["TELECODE_ALLOWED_USERS"] = ""
+    captured = {}
+    sent = []
+
+    monkeypatch.setattr(server, "_send_message", lambda *args, **kwargs: sent.append(args[2]) or 1)
+
+    def fake_handle_prompt(prompt, *_args, **_kwargs):
+        captured["prompt"] = prompt
+
+    monkeypatch.setattr(server, "_handle_prompt", fake_handle_prompt)
+
+    msg = {
+        "message_id": 102,
+        "chat": {"id": 1902},
+        "text": "幫我設計一個資料庫 schema",
+        "from": {"id": 1902, "username": "tester"},
+    }
+    server.handle_text_message(msg, None, _dummy_telegram(), ".telecode", "claude")
+
+    assert captured["prompt"] == "幫我設計一個資料庫 schema"
+    assert sent == []
+
+
+def test_non_image_request_chinese_design_architecture_diagram_goes_to_prompt(monkeypatch, tmp_path):
+    _set_cwd(tmp_path, monkeypatch)
+    os.environ["TELECODE_ALLOWED_USERS"] = ""
+    captured = {}
+    sent = []
+
+    monkeypatch.setattr(server, "_send_message", lambda *args, **kwargs: sent.append(args[2]) or 1)
+
+    def fake_handle_prompt(prompt, *_args, **_kwargs):
+        captured["prompt"] = prompt
+
+    monkeypatch.setattr(server, "_handle_prompt", fake_handle_prompt)
+
+    msg = {
+        "message_id": 103,
+        "chat": {"id": 1903},
+        "text": "幫我設計系統架構圖",
+        "from": {"id": 1903, "username": "tester"},
+    }
+    server.handle_text_message(msg, None, _dummy_telegram(), ".telecode", "claude")
+
+    assert captured["prompt"] == "幫我設計系統架構圖"
+    assert sent == []
+
+
+def test_non_image_request_english_design_coverage_goes_to_prompt(monkeypatch, tmp_path):
+    _set_cwd(tmp_path, monkeypatch)
+    os.environ["TELECODE_ALLOWED_USERS"] = ""
+    captured = {}
+    sent = []
+
+    monkeypatch.setattr(server, "_send_message", lambda *args, **kwargs: sent.append(args[2]) or 1)
+
+    def fake_handle_prompt(prompt, *_args, **_kwargs):
+        captured["prompt"] = prompt
+
+    monkeypatch.setattr(server, "_handle_prompt", fake_handle_prompt)
+
+    msg = {
+        "message_id": 104,
+        "chat": {"id": 1904},
+        "text": "Please design an API coverage plan",
+        "from": {"id": 1904, "username": "tester"},
+    }
+    server.handle_text_message(msg, None, _dummy_telegram(), ".telecode", "claude")
+
+    assert captured["prompt"] == "Please design an API coverage plan"
+    assert sent == []
+
+
 def test_image_generation_followup_option_one_returns_prompt(monkeypatch, tmp_path):
     _set_cwd(tmp_path, monkeypatch)
     os.environ["TELECODE_ALLOWED_USERS"] = ""

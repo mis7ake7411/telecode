@@ -530,10 +530,10 @@ def _is_image_generation_request(text: str) -> bool:
         return False
 
     patterns = [
-        r"\b(generate|create|make|draw)\b.{0,40}\b(image|picture|art|illustration|logo|poster|avatar|photo)\b",
-        r"\b(image|picture|art|illustration|logo|poster|avatar|photo)\b.{0,40}\b(generate|create|make|draw)\b",
-        r"(生成|產生|做|畫).{0,20}(圖片|圖像|照片|插圖|海報|頭像|logo|圖)",
-        r"(圖片|圖像|照片|插圖|海報|頭像|logo|圖).{0,20}(生成|產生|做|畫)",
+        r"\b(generate|create|make|draw|paint|sketch|illustrate)\b.{0,40}\b(image|picture|art|illustration|logo|poster|avatar|photo|banner|flyer|thumbnail|wallpaper|sticker)\b",
+        r"\b(image|picture|art|illustration|logo|poster|avatar|photo|banner|flyer|thumbnail|wallpaper|sticker)\b.{0,40}\b(generate|create|make|draw|paint|sketch|illustrate)\b",
+        r"(生成|產生|做|畫|繪製).{0,20}(圖片|圖像|照片|插圖|海報|頭像|logo|橫幅|封面|貼圖|情境圖)",
+        r"(圖片|圖像|照片|插圖|海報|頭像|logo|橫幅|封面|貼圖|情境圖).{0,20}(生成|產生|做|畫|繪製)",
         r"\bimagegen\b",
     ]
     return any(re.search(pattern, lowered, flags=re.IGNORECASE) for pattern in patterns)
@@ -542,11 +542,11 @@ def _is_image_generation_request(text: str) -> bool:
 def _extract_image_generation_subject(text: str) -> str:
     subject = text.strip()
     subject = re.sub(
-        r"(?i)\b(please|can you|could you|generate|create|make|draw|an|a|image|picture|art|illustration|logo|poster|avatar|photo)\b",
+        r"(?i)\b(please|can you|could you|generate|create|make|draw|paint|sketch|illustrate|an|a|the|image|picture|art|illustration|logo|poster|avatar|photo|banner|flyer|thumbnail|wallpaper|sticker)\b",
         " ",
         subject,
     )
-    subject = re.sub(r"(請|幫我|幫忙|生成|產生|做|畫|一張|一個|圖片|圖像|照片|插圖|海報|頭像|圖)", " ", subject)
+    subject = re.sub(r"(請|幫我|幫忙|生成|產生|做|畫|繪製|一張|一個|一幅|圖片|圖像|照片|插圖|海報|頭像|橫幅|封面|貼圖|情境圖)", " ", subject)
     subject = " ".join(subject.split()).strip()
     return subject or "a clean, modern hero image"
 
